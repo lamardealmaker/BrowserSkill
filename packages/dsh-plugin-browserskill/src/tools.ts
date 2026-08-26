@@ -562,7 +562,8 @@ export function registerTools(deps: ToolDeps): () => void {
       name: "browser_click",
       description:
         "Click an element in the session's active tab. Target is a snapshot ref (@e3) from the " +
-        "last browser_snapshot/browser_observe, or a CSS selector.",
+        "last browser_snapshot/browser_observe, or a CSS selector. A visual Surface requires the " +
+        "captureId and image coordinates returned by browser_screenshot.",
       parameters: {
         target: {
           type: "string",
@@ -579,6 +580,18 @@ export function registerTools(deps: ToolDeps): () => void {
           type: "integer",
           description: "Number of consecutive presses (double-click = 2).",
         },
+        captureId: {
+          type: "string",
+          description: "Short-lived Surface capture id returned by browser_screenshot.",
+        },
+        imageX: {
+          type: "number",
+          description: "X coordinate in capture-image pixels; requires captureId and imageY.",
+        },
+        imageY: {
+          type: "number",
+          description: "Y coordinate in capture-image pixels; requires captureId and imageX.",
+        },
       },
       output: {
         schema: {
@@ -589,6 +602,7 @@ export function registerTools(deps: ToolDeps): () => void {
             tabId: { type: "integer", required: true },
             x: { type: "number", required: true },
             y: { type: "number", required: true },
+            captureId: { type: "string" },
           },
         },
         render: (_args, value) => [
@@ -600,17 +614,41 @@ export function registerTools(deps: ToolDeps): () => void {
       },
       async execute(args, exec) {
         if (args.target.trim().length === 0) throw new Error("target must be a non-empty string");
+        const pointArgCount =
+          Number(args.captureId !== undefined) +
+          Number(args.imageX !== undefined) +
+          Number(args.imageY !== undefined);
+        if (pointArgCount !== 0 && pointArgCount !== 3) {
+          throw new Error("captureId, imageX, and imageY must be given together");
+        }
         const sessionId = registry.resolve(args.session, "browser_click");
         const cmdArgs = ["click", "--session", sessionId];
         if (args.button !== undefined) cmdArgs.push("--button", args.button);
         if (args.clickCount !== undefined) cmdArgs.push("--click-count", String(args.clickCount));
+        if (args.captureId !== undefined) {
+          cmdArgs.push(
+            "--capture",
+            args.captureId,
+            "--image-x",
+            String(args.imageX),
+            "--image-y",
+            String(args.imageY),
+          );
+        }
         cmdArgs.push(args.target);
         const reply = (await runBsk(deps, exec, cmdArgs, "click", sessionId)) as {
           tab_id: number;
           x: number;
           y: number;
+          capture_id?: string;
         };
-        return { session: sessionId, tabId: reply.tab_id, x: reply.x, y: reply.y };
+        return {
+          session: sessionId,
+          tabId: reply.tab_id,
+          x: reply.x,
+          y: reply.y,
+          ...(reply.capture_id !== undefined ? { captureId: reply.capture_id } : {}),
+        };
       },
       presentCall: (args) => ({
         card: "terminal",
@@ -774,6 +812,8 @@ export function registerTools(deps: ToolDeps): () => void {
             width: { type: "integer", required: true },
             height: { type: "integer", required: true },
             byteSize: { type: "integer", required: true },
+            captureId: { type: "string" },
+            captureExpiresAt: { type: "integer" },
             image: {
               type: "object",
               additionalProperties: false,
@@ -793,7 +833,11 @@ export function registerTools(deps: ToolDeps): () => void {
             value.image !== undefined
               ? `[session ${value.session}] screenshot of tab ${value.tabId} (${value.width}x${value.height}px)`
               : `[session ${value.session}] screenshot saved to ${value.path} (${value.width}x${value.height}px, ${value.byteSize} bytes) — this deployment cannot inline images; read the file to view it`;
-          const blocks: ContentBlock[] = [{ type: "text", text }];
+          const captureText =
+            value.captureId !== undefined
+              ? ` Surface capture ${value.captureId} uses capture-image-pixel coordinates and expires at ${value.captureExpiresAt}.`
+              : "";
+          const blocks: ContentBlock[] = [{ type: "text", text: text + captureText }];
           if (value.image !== undefined) {
             blocks.push({
               type: "image",
@@ -832,6 +876,7 @@ export function registerTools(deps: ToolDeps): () => void {
             height: number;
             path: string;
             byte_size: number;
+            capture?: { id: string; expires_at: number };
           };
           writtenPath = reply.path;
           const data = await readFile(reply.path);
@@ -845,6 +890,9 @@ export function registerTools(deps: ToolDeps): () => void {
             width: reply.width,
             height: reply.height,
             byteSize: reply.byte_size,
+            ...(reply.capture !== undefined
+              ? { captureId: reply.capture.id, captureExpiresAt: reply.capture.expires_at }
+              : {}),
             ...(ref !== undefined
               ? {
                   image: {
